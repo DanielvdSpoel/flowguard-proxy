@@ -91,3 +91,24 @@ jobs:
             --with go.chief.tools/flowguard-proxy/caddy=./caddy \
             --replace go.chief.tools/flowguard-proxy=.
           "${RUNNER_TEMP}/caddy" list-modules | grep -x http.handlers.flowguard
+
+  caddy-image:
+    name: Caddy image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Build the image from this checkout
+        run: docker build -f caddy/Dockerfile -t flowguard-caddy:ci .
+
+      - name: Check the plugin and the example Caddyfile
+        run: |
+          docker run --rm flowguard-caddy:ci caddy list-modules | grep -x http.handlers.flowguard
+          # adapt parses the Caddyfile without starting FlowGuard, which would
+          # need a real host key.
+          docker run --rm -e FLOWGUARD_UPSTREAM=http://upstream:80 \
+            -v "${PWD}/deploy/kubernetes/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            flowguard-caddy:ci caddy adapt --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null

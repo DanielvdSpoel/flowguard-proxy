@@ -1,0 +1,13 @@
+.git
+.github
+.idea
+.cache
+.gocache
+*.deb
+*.rpm
+flowguard
+flowguard-*
+flowguard_*
+config.json
+.env
+deploy

@@ -1,0 +1,49 @@
+{
+	# The ingress controller in front terminates TLS, so Caddy listens on
+	# plain HTTP inside the cluster.
+	auto_https off
+
+	# Let in-flight requests finish when a pod stops.
+	grace_period 20s
+
+	flowguard {
+		key {$FLOWGUARD_KEY}
+	}
+
+	servers {
+		# Take the visitor's address from the ingress controller's
+		# X-Forwarded-For, for the PROXY header below. FlowGuard reads the
+		# client IP through its own trusted_proxies, set in the control panel.
+		trusted_proxies static private_ranges
+	}
+}
+
+# Requests from the ingress controller.
+:8080 {
+	flowguard
+
+	# Send allowed requests back to an internal entry point of the ingress
+	# controller, which routes them as usual. The PROXY header carries the
+	# visitor's address, so the ingress controller treats the request as if
+	# it came from the load balancer: it sets X-Forwarded-For and the other
+	# forwarding headers as on its public entry point. TLS keeps https as the
+	# scheme, with the certificate the ingress controller has for the host.
+	#
+	# To send requests to an application Service directly instead, drop the
+	# Host header and the transport block: the application would not
+	# understand the PROXY header.
+	reverse_proxy {$FLOWGUARD_UPSTREAM} {
+		# Caddy sends the upstream's address as Host to HTTPS upstreams.
+		header_up Host {host}
+
+		transport http {
+			proxy_protocol v2
+			tls_server_name {http.request.host}
+		}
+	}
+}
+
+# Health checks, without FlowGuard rules or request logs.
+:8081 {
+	respond /healthz 200
+}

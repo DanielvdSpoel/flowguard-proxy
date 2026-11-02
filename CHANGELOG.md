@@ -9,6 +9,10 @@ release.
 
 ## [Unreleased]
 
+### Added
+
+- Added a container image build for Caddy with the FlowGuard plugin (`caddy/Dockerfile`) and an example Kubernetes deployment in `deploy/kubernetes`, which runs FlowGuard behind an ingress controller. See [Run on Kubernetes](README.md#run-on-kubernetes).
+
 ## [0.33.1]
 
 ### Added

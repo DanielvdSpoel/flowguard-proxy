@@ -1,0 +1,24 @@
+# Example deployment of FlowGuard in Caddy behind an ingress controller. See
+# "Run on Kubernetes" in the README.
+#
+#   kubectl create namespace flowguard
+#   kubectl -n flowguard create secret generic flowguard --from-literal=key=fgsvr_...
+#   kubectl apply -k deploy/kubernetes
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: flowguard
+
+resources:
+  - flowguard.yaml
+
+# The hash suffix restarts the pods when the Caddyfile changes.
+configMapGenerator:
+  - name: flowguard-caddyfile
+    files:
+      - Caddyfile
+
+images:
+  - name: flowguard-caddy
+    newName: ghcr.io/example/flowguard-caddy # Your image, built from caddy/Dockerfile
+    newTag: 0.33.1

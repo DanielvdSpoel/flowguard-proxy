@@ -339,6 +339,155 @@ Some things work differently under Caddy:
 - Upgrades from the control panel are ignored. Upgrade the Caddy binary
   instead.
 
+## Run on Kubernetes
+
+On Kubernetes, FlowGuard runs as the Caddy plugin in a Deployment of its own,
+behind the ingress controller. The ingress controller keeps terminating TLS
+with its own certificates and sends the requests of the hosts you protect to
+FlowGuard. FlowGuard forwards the requests its rules allow to the backend. It
+needs no `iptables`, host networking, or root access.
+
+```text
+client → load balancer → ingress controller (TLS) → FlowGuard in Caddy → backend
+```
+
+[`deploy/kubernetes`](deploy/kubernetes) holds an example to start from.
+
+### Build the image
+
+[`caddy/Dockerfile`](caddy/Dockerfile) builds Caddy with the plugin on the
+official Caddy image. Set `FLOWGUARD_VERSION` to a release, then push the image
+to a registry your cluster can pull from:
+
+```bash
+docker build -f caddy/Dockerfile --build-arg FLOWGUARD_VERSION=0.33.1 \
+  -t registry.example.com/flowguard-caddy:0.33.1 .
+docker push registry.example.com/flowguard-caddy:0.33.1
+```
+
+Without `FLOWGUARD_VERSION`, the image is built from your checkout and reports
+its version as `dev`.
+
+### Deploy
+
+Create a host in the control panel, store its key in a Secret, adjust the
+example, and apply it:
+
+```bash
+kubectl create namespace flowguard
+kubectl -n flowguard create secret generic flowguard --from-literal=key=fgsvr_...
+kubectl apply -k deploy/kubernetes
+```
+
+Before applying, set in the example:
+
+- the image in `kustomization.yaml`;
+- `FLOWGUARD_UPSTREAM` in `flowguard.yaml`, where FlowGuard sends allowed
+  requests (see [Route traffic through FlowGuard](#route-traffic-through-flowguard));
+- the ingress controller's namespace in the NetworkPolicy.
+
+The replicas share one host key. Each reports its pod name as its instance ID
+(`FLOWGUARD_INSTANCE_ID`), so the control panel and request logs tell them
+apart. Each pod fetches its configuration, IP lists, and IP database into an
+`emptyDir` when it starts, so a new pod only becomes ready once it has reached
+the control panel. Running pods keep working while the panel is unreachable.
+
+### Route traffic through FlowGuard
+
+Point the routes of a protected host at the `flowguard` Service on port 80.
+FlowGuard then needs to know where each host's backend is. Either:
+
+- Send everything back to the ingress controller, on an internal entry point
+  that carries your normal routes, and set `FLOWGUARD_UPSTREAM` to it. This is
+  what the example does. Hosts move behind FlowGuard one at a time, and each
+  route keeps its existing Ingress, middlewares, and certificates. Caddy
+  passes the visitor's address with the PROXY protocol and connects with TLS,
+  so the ingress controller sets the same forwarding headers as on its public
+  entry point, and backends see no difference.
+- Or route to the application Services yourself, with a `host` matcher per
+  site in the Caddyfile and without the PROXY protocol.
+
+With Traefik, for example, add an internal entry point with TLS that accepts
+the PROXY protocol from the pod network, without exposing it on the load
+balancer, and a ClusterIP Service for it. In the Traefik Helm chart:
+
+```yaml
+ports:
+  internal:
+    port: 8445
+    exposedPort: 8443
+    expose:
+      default: false
+      internal: true
+    http:
+      tls:
+        enabled: true
+    proxyProtocol:
+      trustedIPs:
+        - 10.244.0.0/16 # Your pod network
+service:
+  additionalServices:
+    internal:
+      type: ClusterIP
+```
+
+The chart names that Service `traefik-internal`. Ingress routes without
+`router.entrypoints` attach to every entry point, so they also serve the
+internal one. Then send each protected host on `websecure` to FlowGuard:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: shop-flowguard
+  namespace: flowguard
+spec:
+  entryPoints: [websecure] # Not the internal one, which would loop
+  routes:
+    - match: Host(`shop.example.com`)
+      priority: 10000 # Above the host's own routes, including longer path rules
+      services:
+        - name: flowguard
+          port: 80
+  tls: {} # Serve the certificate Traefik already has for the host
+```
+
+Deleting the route takes the host out of FlowGuard again. Requests on other
+public entry points skip FlowGuard, so let plain HTTP only redirect to HTTPS,
+as Traefik's `web` entry point usually does. The internal entry point accepts
+the PROXY protocol from any pod in the trusted network, so a pod that can reach
+it can choose the client IP of its own requests.
+
+### Client IP in Kubernetes
+
+FlowGuard receives every request from an ingress controller pod. To evaluate
+rules against the visitor, add the networks the ingress controller's pods run
+in to `trusted_proxies.ipnets`, with any CDN in front of it, such as
+Cloudflare. The NetworkPolicy in the example lets only the ingress controller
+reach FlowGuard, so no other pod in those networks can choose its own client
+IP. If your network plugin does not enforce NetworkPolicies, use
+`trusted_proxies.header_auth` instead and let the ingress controller set the
+header on the routes to FlowGuard.
+
+Caddy's own `trusted_proxies` option, `private_ranges` in the example, lets
+Caddy take the visitor's address from the ingress controller's
+`X-Forwarded-For` header and pass it on in the PROXY header. Caddy uses the
+first address in that header, so the ingress controller must replace the
+header when it comes from a peer it does not trust, as Traefik does.
+
+### Limitations
+
+- FlowGuard does not see the TLS handshake, so requests have no
+  [JA4 fingerprint](#ja4-fingerprints). For JA4, run Caddy at the edge instead:
+  give it the load balancer, let it get the certificates, add the `flowguard`
+  listener wrapper (and `proxy_protocol` for a layer 4 load balancer), and
+  proxy to the ingress controller.
+- Rate limits are counted per replica. A limit of 100 requests per minute lets
+  up to 100 per minute through each replica.
+- A Caddyfile change restarts the pods (through the ConfigMap's hash suffix),
+  and so does a new image. Upgrades from the control panel are ignored, as with
+  any Caddy host.
+
 ## Backend client IP
 
 FlowGuard sits in front of your existing backend and can pass the validated
