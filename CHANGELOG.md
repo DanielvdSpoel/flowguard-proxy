@@ -17,6 +17,13 @@ release.
 - `flowguard run` now downloads the configuration with the host key in `FLOWGUARD_KEY` when the configuration file does not exist yet or belongs to another key, so containers need no `flowguard setup`.
 - Added `--upstream-address`, `--upstream-http-port` and `--upstream-https-port` to `flowguard run`, for a backend that shares FlowGuard's network namespace but not ports 80 and 443.
 
+## [0.33.4]
+
+### Added
+
+- `flowguard network inspect` now warns when a public address on the host is not a bind address. FlowGuard only redirects traffic for its bind addresses, so a web server listening on a wildcard address still accepts connections to the others directly, bypassing FlowGuard. The suggestion includes the `flowguard setup --bind` command that adds them.
+- `flowguard network inspect` now lists the host's non-public addresses that FlowGuard does not listen on (private, carrier-grade NAT, and IPv6 unique local), with the interface that holds each and a hint when it looks like Tailscale, Docker, WireGuard, ZeroTier, a VM bridge, or a DigitalOcean reserved IP anchor. The internet usually cannot reach them, but a web server listening on a wildcard address accepts connections to them without FlowGuard, so you can check who can reach them.
+
 ## [0.33.3]
 
 ### Changed
@@ -839,7 +846,8 @@ _No source changes; this release republishes 0.3.5._
 
 _Initial release._
 
-[Unreleased]: https://github.com/chieftools/flowguard-proxy/compare/v0.33.3...HEAD
+[Unreleased]: https://github.com/chieftools/flowguard-proxy/compare/v0.33.4...HEAD
+[0.33.4]: https://github.com/chieftools/flowguard-proxy/releases/tag/v0.33.4
 [0.33.3]: https://github.com/chieftools/flowguard-proxy/releases/tag/v0.33.3
 [0.33.2]: https://github.com/chieftools/flowguard-proxy/releases/tag/v0.33.2
 [0.33.1]: https://github.com/chieftools/flowguard-proxy/releases/tag/v0.33.1
