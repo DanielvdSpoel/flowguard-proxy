@@ -9,6 +9,14 @@ release.
 
 ## [Unreleased]
 
+### Added
+
+- FlowGuard now runs on Kubernetes as a sidecar of the ingress controller, without `iptables` or root access. The Service of the ingress controller sends its traffic to FlowGuard, which forwards allowed requests to the ingress controller in the same pod. See [Run on Kubernetes](README.md#run-on-kubernetes).
+- Added a container image for `linux/amd64` and `linux/arm64`, published to the GitHub Container Registry for each release and for the main branch.
+- `flowguard run --kubernetes-certificates` loads the certificates from the cluster's TLS Secrets, such as the ones cert-manager writes, and follows their changes.
+- `flowguard run` now downloads the configuration with the host key in `FLOWGUARD_KEY` when the configuration file does not exist yet or belongs to another key, so containers need no `flowguard setup`.
+- Added `--upstream-address`, `--upstream-http-port` and `--upstream-https-port` to `flowguard run`, for a backend that shares FlowGuard's network namespace but not ports 80 and 443.
+
 ## [0.33.3]
 
 ### Changed
