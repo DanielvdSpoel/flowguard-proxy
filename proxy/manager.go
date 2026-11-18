@@ -37,7 +37,17 @@ type Config struct {
 	NoRedirect           bool
 	AdvertiseHTTP3       bool
 	UpstreamClientIPMode string
-	Updater              *updater.Updater
+	// UpstreamAddress replaces the bind address as the backend's address, and
+	// UpstreamHTTPPort and UpstreamHTTPSPort replace ports 80 and 443. They
+	// are for a backend that shares FlowGuard's network namespace but not its
+	// ports, such as an ingress controller in the same Kubernetes pod.
+	UpstreamAddress   string
+	UpstreamHTTPPort  string
+	UpstreamHTTPSPort string
+	// KubernetesCertificates loads the certificates from the cluster's TLS
+	// Secrets instead of from files.
+	KubernetesCertificates bool
+	Updater                *updater.Updater
 	// Fail2Ban replaces the default Fail2Ban manager, mainly for tests.
 	Fail2Ban *fail2ban.Manager
 	// ShutdownTimeout is how long servers drain in-flight requests before
@@ -137,6 +147,9 @@ func NewManager(configMgr *config.Manager, cfg *Config) (*Manager, error) {
 	var transparentPool *transparentTransportPool
 	var transparentNet *transparentNetworkManager
 	if upstreamMode == config.UpstreamClientIPModeTransparent {
+		if cfg.UpstreamAddress != "" {
+			return nil, fmt.Errorf("--upstream-address requires server.upstream.client_ip_mode=%q: transparent mode reaches the backend on the bind address", config.UpstreamClientIPModeHeaders)
+		}
 		if runtime.GOOS != "linux" {
 			return nil, fmt.Errorf("server.upstream.client_ip_mode=%q is supported only on Linux", upstreamMode)
 		}
@@ -154,6 +167,14 @@ func NewManager(configMgr *config.Manager, cfg *Config) (*Manager, error) {
 			upstreamSettings.FWMark,
 		)
 		transparentNet = newTransparentNetworkManager(upstreamSettings, cfg.BindAddrs)
+	}
+
+	var kubernetesCertificates *certmanager.KubernetesConfig
+	if cfg.KubernetesCertificates {
+		kubernetesCertificates, err = certmanager.InClusterKubernetesConfig()
+		if err != nil {
+			return nil, fmt.Errorf("load certificates from Kubernetes: %w", err)
+		}
 	}
 
 	pm = &Manager{
@@ -176,6 +197,7 @@ func NewManager(configMgr *config.Manager, cfg *Config) (*Manager, error) {
 			TLSNextProtos:   tlsNextProtos(protocols),
 			NginxConfigPath: nginxConfigPath,
 			DefaultHostname: defaultHostname,
+			Kubernetes:      kubernetesCertificates,
 		}),
 
 		serveErrChan:        make(chan error, max(1, len(cfg.BindAddrs)*2)),
@@ -222,6 +244,14 @@ func NewManager(configMgr *config.Manager, cfg *Config) (*Manager, error) {
 func (p *Manager) validateCertificateSources(certPath, acmePath, nginxConfigPath string) error {
 	if p.certManager.HostnameCount() > 0 {
 		return nil
+	}
+
+	if p.config.KubernetesCertificates {
+		if p.certManager.KubernetesSynced() {
+			log.Printf("[cert_manager] No certificates loaded, but the Kubernetes TLS Secrets were read; allowing proxy startup")
+			return nil
+		}
+		return fmt.Errorf("the Kubernetes TLS Secrets could not be read")
 	}
 
 	if nginxConfigPath != "" && p.certManager.NginxConfigLoaded() {
@@ -658,6 +688,8 @@ func (p *Manager) startServers(protocols config.ProtocolSettings, advertiseHTTP3
 				bindAddr:        bindAddr,
 				bindPort:        p.config.HTTPPort,
 				redirPort:       httpRedirPort,
+				upstreamAddr:    p.config.UpstreamAddress,
+				upstreamPort:    p.config.UpstreamHTTPPort,
 				protocols:       &protocols,
 				middleware:      p.middlewareChain,
 				transparentPool: p.transparentPool,
@@ -684,6 +716,8 @@ func (p *Manager) startServers(protocols config.ProtocolSettings, advertiseHTTP3
 			bindAddr:        bindAddr,
 			bindPort:        p.config.HTTPSPort,
 			redirPort:       httpsRedirPort,
+			upstreamAddr:    p.config.UpstreamAddress,
+			upstreamPort:    p.config.UpstreamHTTPSPort,
 			protocols:       &protocols,
 			middleware:      p.middlewareChain,
 			transparentPool: p.transparentPool,
