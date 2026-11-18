@@ -625,9 +625,13 @@ func (s *Server) upstreamAddress() string {
 	return net.JoinHostPort(s.upstreamHost(), s.upstreamPort())
 }
 
-// upstreamHost returns the bind address without brackets.
+// upstreamHost returns the backend's address without brackets: the configured
+// upstream address, or else the bind address.
 func (s *Server) upstreamHost() string {
 	host := s.config.bindAddr
+	if s.config.upstreamAddr != "" {
+		host = s.config.upstreamAddr
+	}
 	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
 		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
 	}
@@ -635,6 +639,9 @@ func (s *Server) upstreamHost() string {
 }
 
 func (s *Server) upstreamPort() string {
+	if s.config.upstreamPort != "" {
+		return s.config.upstreamPort
+	}
 	if s.config.scheme == "https" {
 		return "443"
 	}

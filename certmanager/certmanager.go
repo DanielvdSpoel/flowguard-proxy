@@ -1,6 +1,7 @@
 package certmanager
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
 	"crypto/tls"
@@ -27,6 +28,8 @@ type Config struct {
 	TLSNextProtos   []string
 	NginxConfigPath string
 	DefaultHostname string
+	// Kubernetes loads the certificates of the cluster's TLS Secrets when set.
+	Kubernetes *KubernetesConfig
 }
 
 // certificateWithMetadata wraps a TLS certificate with selection metadata
@@ -52,6 +55,7 @@ type Manager struct {
 	nginxCertFiles    []string                              // List of certificate files referenced in NGINX config
 	nginxConfigFiles  []string                              // List of NGINX config files to watch
 	nginxConfigLoaded bool                                  // True when the configured NGINX config was read successfully
+	kubernetes        *kubernetesSecrets                    // TLS Secrets of the cluster, when configured
 }
 
 // New creates a new certificate manager
@@ -73,7 +77,24 @@ func New(config Config) *Manager {
 		watchedDirs:      make(map[string]bool),
 	}
 
+	if config.Kubernetes != nil {
+		secrets, err := newKubernetesSecrets(*config.Kubernetes)
+		if err != nil {
+			log.Printf("[cert_manager] Kubernetes TLS Secrets are unavailable: %v", err)
+		} else {
+			cm.kubernetes = secrets
+			// List before the first load, so the proxy starts with certificates.
+			if err := secrets.list(context.Background()); err != nil {
+				log.Printf("[cert_manager] Error reading Kubernetes TLS Secrets: %v", err)
+			}
+		}
+	}
+
 	cm.loadAllCertificates(false)
+
+	if cm.kubernetes != nil {
+		go cm.watchKubernetes()
+	}
 
 	// Setup file watches
 	if watcher != nil {
@@ -104,6 +125,12 @@ func (cm *Manager) NginxConfigLoaded() bool {
 	cm.cacheMutex.RLock()
 	defer cm.cacheMutex.RUnlock()
 	return cm.nginxConfigLoaded
+}
+
+// KubernetesSynced reports whether the cluster's TLS Secrets were read
+// successfully at least once.
+func (cm *Manager) KubernetesSynced() bool {
+	return cm.kubernetes != nil && cm.kubernetes.isSynced()
 }
 
 // GetTlsConfig returns the tls configuration for use in servers
@@ -723,6 +750,7 @@ func (cm *Manager) loadAllCertificates(verbose bool) {
 	fromNginx := 0
 	fromDirectAdmin := 0
 	fromCertbot := 0
+	fromKubernetes := 0
 	nginxConfigLoaded := false
 
 	// Load from a DirectAdmin installation, a certbot config directory or a
@@ -865,6 +893,22 @@ func (cm *Manager) loadAllCertificates(verbose bool) {
 		}
 	}
 
+	// Load from the cluster's TLS Secrets. A failed list or watch keeps the
+	// last known Secrets, so their certificates stay loaded.
+	if cm.kubernetes != nil {
+		for _, secret := range cm.kubernetes.snapshot() {
+			metadata, hostnames := cm.loadKubernetesSecret(secret, verbose)
+			if metadata == nil {
+				continue
+			}
+			for _, name := range hostnames {
+				tempHostnameCache[name] = append(tempHostnameCache[name], metadata)
+			}
+			successCount++
+			fromKubernetes++
+		}
+	}
+
 	// Atomically swap the cache
 	cm.cacheMutex.Lock()
 	cm.hostnameCache = tempHostnameCache
@@ -888,6 +932,9 @@ func (cm *Manager) loadAllCertificates(verbose bool) {
 	}
 	if fromNginx > 0 {
 		sources = append(sources, fmt.Sprintf("%d from NGINX config", fromNginx))
+	}
+	if fromKubernetes > 0 {
+		sources = append(sources, fmt.Sprintf("%d from Kubernetes Secrets", fromKubernetes))
 	}
 	sourceMsg := strings.Join(sources, ", ")
 	if sourceMsg == "" {

@@ -24,11 +24,13 @@ and request filtering stay on the FlowGuard host.
 - Redirects ports 80 and 443 to FlowGuard with `iptables` or `ip6tables`.
 - Serves HTTP/1.1, HTTP/2, and HTTP/3 according to the configured protocol set.
 - Terminates TLS with certificates loaded from a directory, Traefik `acme.json`,
-  or NGINX configuration.
+  NGINX configuration, or Kubernetes TLS Secrets.
 - Supports canonical forwarding headers and same-host transparent client source
   addresses.
 - Accepts PROXY protocol v1 and v2 headers from trusted layer 4 load balancers.
 - Binds to multiple IPv4 and IPv6 addresses.
+- Runs as a sidecar of the ingress controller on
+  [Kubernetes](#run-on-kubernetes), without `iptables` or root access.
 - Removes FlowGuard-owned firewall and routing state during a clean shutdown.
 
 ### Request filtering
@@ -347,6 +349,117 @@ Some things work differently under Caddy:
   ignored. Caddy handles them.
 - Upgrades from the control panel are ignored. Upgrade the Caddy binary
   instead.
+
+## Run on Kubernetes
+
+On Kubernetes, FlowGuard runs as a sidecar container in the pod of your ingress
+controller. The pod takes the place of the server: FlowGuard receives the
+traffic of the load balancer, terminates TLS, applies your rules, and forwards
+allowed requests to the ingress controller in the same pod. Routes, Ingresses,
+and certificates stay as they are, and every host is protected.
+
+```text
+client → load balancer → Service → FlowGuard (11080/11443) → ingress controller (127.0.0.1)
+```
+
+No `iptables` rules, host networking, or root access are needed: the Service
+of the ingress controller sends its traffic to FlowGuard's ports.
+
+### Image
+
+The [image workflow](.github/workflows/image.yml) publishes
+`ghcr.io/<owner>/flowguard-proxy` for `linux/amd64` and `linux/arm64`: a
+version tag and `latest` for each release, and `main` and `sha-<commit>` for
+the main branch. To build it yourself:
+
+```bash
+docker build --build-arg VERSION=0.34.0 -t registry.example.com/flowguard:0.34.0 .
+```
+
+The image runs as user 65532 and keeps its configuration and cache in
+`/var/lib/flowguard`.
+
+### Deploy with Traefik
+
+Create a host in the control panel and store its key in a Secret in the
+namespace of the ingress controller:
+
+```bash
+kubectl -n traefik create secret generic flowguard --from-literal=key=fgsvr_...
+```
+
+Then add the values in
+[`deploy/kubernetes/traefik-values.yaml`](deploy/kubernetes/traefik-values.yaml)
+to the values of the Traefik Helm chart. They:
+
+- add the `flowguard` container to the Traefik pod;
+- point the Service's ports 80 and 443 at FlowGuard (`ports.*.targetPort`);
+- let Traefik trust `X-Forwarded-For` from `127.0.0.1` only, which is
+  FlowGuard.
+
+Other ingress controllers work the same way: add the container to the pod,
+point the Service's `targetPort` at 11080 and 11443, and trust forwarding
+headers from loopback.
+
+The container runs `flowguard run` with these options:
+
+| Option | Description |
+| --- | --- |
+| `FLOWGUARD_KEY` (environment) | Host key from the control panel. FlowGuard downloads the host configuration when the configuration file does not exist yet or belongs to another key, so `flowguard setup` is not needed. The pod does not become ready until the control panel was reached once. |
+| `--no-redirect` | Do not set up `iptables` redirects. |
+| `--bind` | The pod's IP address, from the `status.podIP` field. |
+| `--kubernetes-certificates` | Load the certificates from the cluster's TLS Secrets. |
+| `--upstream-address` | Address of the ingress controller, `127.0.0.1` in the same pod. Requires the `headers` client IP mode, which is the default. |
+| `--upstream-http-port`, `--upstream-https-port` | Ports the ingress controller listens on in the pod, instead of 80 and 443. |
+
+The replicas share one host key. Each reports its pod name as its instance ID
+(`FLOWGUARD_INSTANCE_ID`), so the control panel and request logs tell them
+apart.
+
+### Certificates from Secrets
+
+With `--kubernetes-certificates`, FlowGuard reads every Secret of type
+`kubernetes.io/tls` in the cluster, such as the ones cert-manager writes, and
+serves each certificate for the hostnames it names. It follows changes with a
+watch, so a new or renewed certificate is served shortly after it is written. If the API
+server is unreachable, FlowGuard keeps the certificates it has.
+
+FlowGuard uses the service account of the pod, which must be allowed to `list`
+and `watch` Secrets in all namespaces. Traefik's ClusterRole already allows
+that when it watches all namespaces, which is the chart's default. Certificates
+that the ingress controller keeps elsewhere, such as Traefik's own ACME
+storage, are not in Secrets: use `host.acme_path` or `host.cert_path` for
+those.
+
+### Client IP on Kubernetes
+
+Configure the proxies in front of the pod as
+[trusted proxies](#proxy-protocol) of the host in the control panel:
+
+- With a layer 4 load balancer that sends the PROXY protocol, list the
+  addresses the load balancer's connections come from in
+  `trusted_proxies.proxy_protocol.ipnets`. These are often node or pod network
+  addresses, because the cluster forwards connections between nodes.
+- List a CDN such as Cloudflare in `trusted_proxies.ipnets`.
+
+Remove the PROXY protocol and forwarded header settings for these proxies from
+the ingress controller: it only sees connections from FlowGuard. The backends
+receive the visitor's address in `X-Real-IP` and as the first address in
+`X-Forwarded-For`. The ingress controller appends `127.0.0.1` to
+`X-Forwarded-For`, because FlowGuard is its direct peer.
+
+### Limitations on Kubernetes
+
+- Rate limits are counted per replica. A limit of 100 requests per minute lets
+  up to 100 per minute through each replica.
+- A new FlowGuard version is a new image, which restarts the ingress
+  controller's pods. Run at least two replicas. Upgrades from the control
+  panel are ignored.
+- Only the ports the Service sends to FlowGuard are protected. A pod that
+  connects to the ingress controller's own ports skips FlowGuard, although it
+  cannot forge a client IP. Restrict that with a NetworkPolicy if needed.
+- HTTP/3 needs a UDP port on the Service and the load balancer, which this
+  setup does not configure.
 
 ## Backend client IP
 

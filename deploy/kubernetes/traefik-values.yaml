@@ -1,0 +1,85 @@
+# FlowGuard as a sidecar of Traefik, as values for the Traefik Helm chart. Merge
+# them into your own values. See "Run on Kubernetes" in the README.
+#
+# Traffic: Service port 80/443 -> FlowGuard in the pod (11080/11443) ->
+# Traefik on 127.0.0.1 (8000/8443).
+#
+#   kubectl -n traefik create secret generic flowguard --from-literal=key=fgsvr_...
+#   helm upgrade traefik traefik/traefik -n traefik -f values.yaml -f traefik-values.yaml
+
+ports:
+  web:
+    port: 8000
+    # The Service sends traffic to FlowGuard instead of Traefik.
+    targetPort: 11080
+    # FlowGuard reaches Traefik over loopback and passes the visitor's address
+    # in X-Forwarded-For. No other pod can connect from 127.0.0.1. This
+    # replaces the proxies Traefik trusted before: FlowGuard resolves them
+    # now, from trusted_proxies in the control panel.
+    forwardedHeaders:
+      trustedIPs: [127.0.0.1/32]
+  websecure:
+    port: 8443
+    targetPort: 11443
+    forwardedHeaders:
+      trustedIPs: [127.0.0.1/32]
+
+deployment:
+  additionalContainers:
+    - name: flowguard
+      image: ghcr.io/chieftools/flowguard-proxy:latest # Pin a version
+      args:
+        - run
+        - --no-redirect
+        - --bind=$(POD_IP)
+        - --config=/var/lib/flowguard/config.json
+        - --cache-dir=/var/lib/flowguard/cache
+        - --kubernetes-certificates
+        - --upstream-address=127.0.0.1
+        - --upstream-http-port=8000 # ports.web.port
+        - --upstream-https-port=8443 # ports.websecure.port
+      env:
+        # Host key from the FlowGuard control panel. All replicas share it.
+        - name: FLOWGUARD_KEY
+          valueFrom:
+            secretKeyRef:
+              name: flowguard
+              key: key
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        # Tells the replicas apart in the control panel and request logs.
+        - name: FLOWGUARD_INSTANCE_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+      ports:
+        - name: fg-http
+          containerPort: 11080
+        - name: fg-https
+          containerPort: 11443
+      # The pod only receives traffic once FlowGuard listens, which it does
+      # after it downloaded its configuration and read the certificates.
+      readinessProbe:
+        tcpSocket:
+          port: fg-https
+        periodSeconds: 5
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi
+        limits:
+          memory: 512Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: flowguard-data
+          mountPath: /var/lib/flowguard
+  additionalVolumes:
+    # Configuration, IP lists and IP database, downloaded when the pod starts.
+    - name: flowguard-data
+      emptyDir: {}

@@ -69,6 +69,10 @@ type ServerConfig struct {
 	// loadBalancer reports whether a peer is a layer 4 load balancer that may
 	// set the client address with a PROXY protocol header.
 	loadBalancer func(netip.Addr) bool
+	// upstreamAddr and upstreamPort replace the bind address and the scheme's
+	// default port as the backend's address when set.
+	upstreamAddr string
+	upstreamPort string
 }
 
 func NewServer(config *ServerConfig) *Server {

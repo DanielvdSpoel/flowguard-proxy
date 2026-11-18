@@ -1,0 +1,89 @@
+name: Build and Publish Image
+
+# Publishes the container image for Kubernetes (README: "Run on Kubernetes")
+# to this repository's GitHub Container Registry:
+#
+#   v1.2.3 tag  ->  :1.2.3 and :latest
+#   main        ->  :main and :sha-<commit>
+#   manually    ->  the tag you enter, built from the branch you pick
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish (e.g., my-test)'
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: image-${{ github.ref }}
+
+jobs:
+  image:
+    name: Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Determine tags
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [[ ! "${REQUESTED_TAG}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+              echo "::error::Invalid image tag."
+              exit 1
+            fi
+            VERSION="${REQUESTED_TAG}"
+            TAGS="${REQUESTED_TAG}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAGS="${VERSION} latest"
+          else
+            VERSION="${GITHUB_REF_NAME}-${SHORT_SHA}"
+            TAGS="${GITHUB_REF_NAME} sha-${SHORT_SHA}"
+          fi
+
+          TAG_ARGS=""
+          for TAG in ${TAGS}; do
+            TAG_ARGS="${TAG_ARGS} --tag ${IMAGE}:${TAG}"
+          done
+
+          printf 'IMAGE_VERSION=%s\n' "${VERSION}" >> "${GITHUB_ENV}"
+          printf 'IMAGE_TAG_ARGS=%s\n' "${TAG_ARGS}" >> "${GITHUB_ENV}"
+          echo "Publishing ${IMAGE} as: ${TAGS}"
+
+      - name: Log in to the registry
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: printf '%s' "${REGISTRY_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+
+      - name: Build and push
+        run: |
+          # The Dockerfile cross-compiles, so the arm64 image needs no emulation.
+          docker buildx create --use
+          # shellcheck disable=SC2086
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=${IMAGE_VERSION}" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${IMAGE_VERSION}" \
+            ${IMAGE_TAG_ARGS} \
+            --push .
